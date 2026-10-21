@@ -1,0 +1,396 @@
+import SwiftUI
+import SwiftData
+
+/// 时间轴单条事件卡片
+/// - 左侧垂直时间线（始终存在、连续竖线 + 类型色圆点）
+/// - 卡片不再有灰色背景
+/// - 照片展示：主图在前，其余堆叠在后（档案卡片效果），左滑切换主图
+/// - 点击主图进入全屏预览
+/// - 卡片右上角三个点：编辑照片、添加记录
+/// - 左滑删除，级联删除关联照片
+struct TimelineRow: View {
+    @Environment(\.modelContext) private var modelContext
+    let event: TimelineEvent
+    let onDelete: () -> Void
+
+    @State private var selectedPhotoIndex = 0
+    @State private var showDeleteError = false
+    @State private var deleteErrorMessage = ""
+    @State private var showPhotoPreview = false
+    @State private var showPhotoEditor = false
+    @State private var showRecordEditor = false
+
+    private let dotColumnWidth: CGFloat = 14
+    private let lineWidth: CGFloat = 2
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            // 左侧时间线：圆点（始终存在）
+            VStack(spacing: 0) {
+                Circle()
+                    .fill(event.eventType.color)
+                    .frame(width: 14, height: 14)
+                    .padding(.top, 14)
+                    .overlay(
+                        Circle()
+                            .stroke(Color(uiColor: .secondarySystemBackground), lineWidth: 2)
+                    )
+                Spacer()
+            }
+            .frame(width: dotColumnWidth)
+
+            card
+        }
+        // 贯穿整行的连续竖线，与圆点对齐
+        .overlay(alignment: .topLeading) {
+            Rectangle()
+                .fill(Color.secondary.opacity(0.25))
+                .frame(width: lineWidth)
+                .frame(maxHeight: .infinity)
+                .offset(x: (dotColumnWidth - lineWidth) / 2, y: 14)
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button(role: .destructive) {
+                onDelete()
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+        .alert("删除失败", isPresented: $showDeleteError) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(deleteErrorMessage)
+        }
+        // 全屏预览
+        .fullScreenCover(isPresented: $showPhotoPreview) {
+            PhotoPreviewView(photos: event.photos, startIndex: selectedPhotoIndex)
+        }
+        // 编辑页
+        .fullScreenCover(isPresented: $showPhotoEditor) {
+            if let photoData = event.photos[safe: selectedPhotoIndex]?.imageData {
+                PhotoEditorView(imageData: photoData) { editedData in
+                    updateEventPhoto(editedData)
+                }
+            }
+        }
+        // 添加记录页
+        .sheet(isPresented: $showRecordEditor) {
+            AddRecordView(event: event)
+        }
+    }
+
+    // MARK: - 卡片（无灰色背景）
+
+    private var card: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+
+            if !event.title.isEmpty {
+                Text(event.title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+            }
+
+            if !event.content.isEmpty {
+                Text(event.content)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+
+            if let location = event.locationName, !location.isEmpty {
+                Label(location, systemImage: "location.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !event.photos.isEmpty {
+                PhotoStackView(
+                    photos: event.photos,
+                    selectedIndex: $selectedPhotoIndex,
+                    onMainImageTap: {
+                        showPhotoPreview = true
+                    }
+                )
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(event.date.displayDateString)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.primary)
+            }
+
+            Spacer(minLength: 8)
+
+            // 右上角三个点菜单 - 修复：点击不再触发图片点击
+            Menu {
+                Button {
+                    editEventPhotos()
+                } label: {
+                    Label("编辑照片", systemImage: "photo.on.rectangle.angled")
+                }
+                Button {
+                    addEventRecord()
+                } label: {
+                    Label("添加记录", systemImage: "plus.circle")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.secondary)
+            }
+            .menuOrder(.fixed)
+            .menuIndicator(.hidden)
+        }
+    }
+
+    // MARK: - 操作
+
+    private func editEventPhotos() {
+        // 直接打开编辑页（编辑当前选中的照片）
+        if event.photos[safe: selectedPhotoIndex] != nil {
+            showPhotoEditor = true
+        }
+    }
+
+    private func addEventRecord() {
+        showRecordEditor = true
+    }
+
+    private func updateEventPhoto(_ newImageData: Data) {
+        // 更新选中的照片
+        if let index = event.photos.firstIndex(where: { $0.id == event.photos[selectedPhotoIndex].id }) {
+            event.photos[index].imageData = newImageData
+            try? modelContext.save()
+        }
+    }
+
+    func deleteEvent() {
+        do {
+            modelContext.delete(event)
+            try modelContext.save()
+        } catch {
+            deleteErrorMessage = error.localizedDescription
+            showDeleteError = true
+        }
+    }
+}
+
+/// 照片堆叠展示：主图在前，其余像档案卡片一样堆叠在后
+/// 左滑主图 -> 下一张放大成为主图，原主图移到最后
+struct PhotoStackView: View {
+    let photos: [EventPhoto]
+    @Binding var selectedIndex: Int
+    let onMainImageTap: () -> Void
+
+    private let mainImageHeight: CGFloat = 240
+    private let stackOffset: CGFloat = 8  // 每层卡片的错开偏移
+
+    var body: some View {
+        if photos.count == 1 {
+            mainImageView(photos[0])
+                .frame(height: mainImageHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .onTapGesture { onMainImageTap() }
+        } else {
+            ZStack(alignment: .center) {
+                // 背后堆叠的照片（从后往前渲染，最底层是最后一张）
+                ForEach(Array(photos.enumerated()).reversed(), id: \.offset) { index, photo in
+                    if index != selectedIndex {
+                        // 计算在堆叠中的相对位置
+                        let relativePos = stackPosition(for: index)
+                        stackImageView(photo, at: relativePos, total: photos.count - 1)
+                    }
+                }
+
+                // 主图（最上层）
+                mainImageView(photos[selectedIndex])
+                    .frame(height: mainImageHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+                    .zIndex(1)
+                    .onTapGesture { onMainImageTap() }
+                    .gesture(
+                        DragGesture(minimumDistance: 20)
+                            .onEnded { value in
+                                let threshold: CGFloat = 50
+                                if value.translation.width < -threshold {
+                                    // 左滑 -> 下一张成为主图，当前移到最后
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                        moveCurrentToBack()
+                                    }
+                                } else if value.translation.width > threshold {
+                                    // 右滑 -> 最后一张移到前面成为主图
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                        moveLastToFront()
+                                    }
+                                }
+                            }
+                    )
+            }
+            .frame(height: mainImageHeight + CGFloat(photos.count - 1) * stackOffset + 20)
+        }
+    }
+
+    // 计算某张图在堆叠中的相对位置（0 = 最靠近主图，越大越靠后）
+    private func stackPosition(for index: Int) -> Int {
+        let count = photos.count - 1 // 排除主图
+        let diff = (index - selectedIndex + count) % count
+        return diff == 0 ? count - 1 : diff - 1
+    }
+
+    // 堆叠中的单张图片视图
+    private func stackImageView(_ photo: EventPhoto, at position: Int, total: Int) -> some View {
+        let maxVisibleStack = 4  // 最多显示几层堆叠
+        let clampedPosition = min(position, maxVisibleStack - 1)
+        
+        return Image(uiImage: UIImage(data: photo.imageData) ?? UIImage())
+            .resizable()
+            .aspectRatio(contentMode: .fill)
+            .frame(height: mainImageHeight - CGFloat(clampedPosition) * stackOffset)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.white.opacity(0.6), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.1), radius: 3, x: 0, y: 2)
+            .offset(
+                x: CGFloat(clampedPosition) * stackOffset * 0.5,
+                y: CGFloat(clampedPosition) * stackOffset * 0.3
+            )
+            .scaleEffect(1.0 - CGFloat(clampedPosition) * 0.02)
+            .zIndex(Double(total - position))
+            .opacity(position < maxVisibleStack ? 1.0 : 0.0)
+            .onTapGesture {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    // 点击堆叠中的某张 -> 旋转到该位置
+                    rotateToIndex(indexFromStackPosition(position))
+                }
+            }
+    }
+
+    // 从堆叠位置反推实际数组索引
+    private func indexFromStackPosition(_ stackPos: Int) -> Int {
+        let count = photos.count - 1
+        let targetPos = (selectedIndex + 1 + stackPos) % count
+        return targetPos
+    }
+
+    // 主图视图
+    private func mainImageView(_ photo: EventPhoto) -> some View {
+        Group {
+            if let uiImage = UIImage(data: photo.imageData) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(maxWidth: .infinity)
+            } else {
+                Rectangle()
+                    .fill(Color.gray.opacity(0.25))
+                    .frame(maxWidth: .infinity)
+                    .overlay {
+                        Image(systemName: "photo")
+                            .foregroundStyle(.secondary)
+                    }
+            }
+        }
+    }
+
+    // 左滑：当前主图移到最后，下一张成为主图
+    private func moveCurrentToBack() {
+        let nextIndex = (selectedIndex + 1) % photos.count
+        selectedIndex = nextIndex
+    }
+
+    // 右滑：最后一张移到前面成为主图
+    private func moveLastToFront() {
+        let prevIndex = (selectedIndex - 1 + photos.count) % photos.count
+        selectedIndex = prevIndex
+    }
+
+    // 旋转到指定索引
+    private func rotateToIndex(_ targetIndex: Int) {
+        selectedIndex = targetIndex
+    }
+}
+
+/// 照片预览（全屏）- 支持在预览页切换
+struct PhotoPreviewView: View {
+    let photos: [EventPhoto]
+    let startIndex: Int
+    @Environment(\.dismiss) private var dismiss
+    @State private var currentIndex: Int
+
+    init(photos: [EventPhoto], startIndex: Int) {
+        self.photos = photos
+        self.startIndex = startIndex
+        _currentIndex = State(initialValue: startIndex)
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            TabView(selection: $currentIndex) {
+                ForEach(Array(photos.enumerated()), id: \.offset) { index, photo in
+                    Image(uiImage: UIImage(data: photo.imageData) ?? UIImage())
+                        .resizable()
+                        .scaledToFit()
+                        .tag(index)
+                }
+            }
+            .tabViewStyle(.page)
+            .ignoresSafeArea()
+            .background(Color.black)
+            .overlay(alignment: .topTrailing) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 28))
+                        .foregroundColor(.white)
+                        .opacity(0.8)
+                }
+                .padding()
+            }
+            .onAppear { currentIndex = startIndex }
+        }
+    }
+}
+
+/// 单张照片缩略图（保留供其他可能用到的地方）
+struct PhotoThumbnailView: View {
+    let imageData: Data
+
+    var body: some View {
+        Group {
+            if let uiImage = UIImage(data: imageData) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                Rectangle()
+                    .fill(Color.gray.opacity(0.25))
+                    .overlay {
+                        Image(systemName: "photo")
+                            .foregroundStyle(.secondary)
+                    }
+            }
+        }
+        .frame(width: 84, height: 84)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+/// 安全数组下标
+extension Array {
+    subscript(safe index: Int) -> Element? {
+        return indices.contains(index) ? self[index] : nil
+    }
+}

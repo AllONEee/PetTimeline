@@ -1,0 +1,227 @@
+import SwiftUI
+import SwiftData
+import PhotosUI
+
+/// 时间轴主页：按 date 倒序展示事件卡片
+struct PetTimelineView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \Pet.name) private var pets: [Pet]
+    @Query(sort: \TimelineEvent.date, order: .reverse) private var allEvents: [TimelineEvent]
+    
+    @State private var selectedPet: Pet?
+    @State private var showAddEvent = false
+    @State private var showPhotoImporter = false
+    @State private var importItems: [PhotosPickerItem] = []
+    @State private var isImporting = false
+    @State private var importProgress: Double = 0
+    @State private var importStatus = ""
+    @State private var showImportError = false
+    @State private var importErrorMessage = ""
+    @State private var showPetManagement = false
+    @State private var showAddPet = false
+    
+    var events: [TimelineEvent] {
+        guard let pet = selectedPet else { return [] }
+        return allEvents.filter { $0.pet == pet }
+    }
+    
+    var body: some View {
+        Group {
+            if pets.isEmpty {
+                VStack(spacing: 24) {
+                    Image(systemName: "pawprint.circle")
+                        .font(.system(size: 64))
+                        .foregroundStyle(.secondary)
+                    Text("还没有宠物，点击下方添加第一只宠物")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        showAddPet = true
+                    } label: {
+                        Text("添加宠物")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                            .frame(width: 180, height: 45)
+                            .background(Color.accentColor)
+                            .cornerRadius(22)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                NavigationStack {
+                    ZStack {
+                        VStack {
+                            if events.isEmpty {
+                                emptyState
+                            } else {
+                                timelineList
+                            }
+                        }
+                        
+                        if isImporting {
+                            importOverlay
+                        }
+                    }
+                    .navigationTitle("宠物时间轴")
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Picker("宠物", selection: $selectedPet) {
+                                ForEach(pets) { pet in
+                                    Text(pet.name.isEmpty ? "无名宠物" : pet.name)
+                                        .tag(pet as Pet?)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Menu {
+                                Button {
+                                    showPhotoImporter = true
+                                } label: {
+                                    Label("添加照片", systemImage: "photo.badge.plus")
+                                }
+                                Button {
+                                    showAddEvent = true
+                                } label: {
+                                    Label("添加记录", systemImage: "square.and.pencil")
+                                }
+                                Button {
+                                    showPetManagement = true
+                                } label: {
+                                    Label("宠物管理", systemImage: "gearshape")
+                                }
+                            } label: {
+                                Image(systemName: "plus.circle")
+                            }
+                        }
+                    }
+                    .sheet(isPresented: $showAddEvent) {
+                        AddEventView(selectedPet: $selectedPet)
+                    }
+                    .sheet(isPresented: $showPetManagement) {
+                        PetManagementView()
+                    }
+                    // iOS 17 原生照片选择器修饰符：替代 Menu 内嵌 PhotosPicker（后者点击无效）
+                    .photosPicker(
+                        isPresented: $showPhotoImporter,
+                        selection: $importItems,
+                        maxSelectionCount: 0,
+                        selectionBehavior: .ordered,
+                        matching: .images
+                    )
+                    .alert("导入失败", isPresented: $showImportError) {
+                        Button("好", role: .cancel) {}
+                    } message: {
+                        Text(importErrorMessage)
+                    }
+                }
+            }
+        }
+        // sheet 放在 Group 级别，确保无论是否有宠物都能弹出
+        .sheet(isPresented: $showAddPet) {
+            AddEditPetView()
+        }
+        .onChange(of: importItems) { _, newValue in
+            guard !newValue.isEmpty else { return }
+            Task { await handleImport(newValue) }
+        }
+        .onAppear {
+            if selectedPet == nil, let first = pets.first {
+                selectedPet = first
+            }
+        }
+    }
+
+    // MARK: - 空状态（左侧竖线常驻，右侧放一个加号入口）
+
+    private var emptyState: some View {
+        ZStack(alignment: .leading) {
+            Rectangle()
+                .fill(Color.secondary.opacity(0.25))
+                .frame(width: 2)
+                .frame(maxHeight: .infinity)
+            
+            Button {
+                showPhotoImporter = true
+            } label: {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 36))
+                    .foregroundColor(.accentColor)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    // MARK: - 时间轴列表
+
+    private var timelineList: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(events) { event in
+                    TimelineRow(event: event) {
+                        deleteEvent(event)
+                    }
+                    .padding(.horizontal)
+                    .padding(.bottom, 20)
+                }
+            }
+            .padding(.vertical)
+        }
+    }
+
+    // MARK: - 删除
+
+    private func deleteEvent(_ event: TimelineEvent) {
+        do {
+            modelContext.delete(event)
+            try modelContext.save()
+        } catch {
+            print("删除失败：\(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - 导入
+
+    private var importOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.25)
+                .ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                ProgressView(value: importProgress)
+                    .progressViewStyle(.linear)
+                    .frame(width: 200)
+                Text(importStatus)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(24)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+    }
+
+    private func handleImport(_ items: [PhotosPickerItem]) async {
+        isImporting = true
+        importProgress = 0
+        importStatus = "准备导入…"
+
+        do {
+            try await PhotoImportService.shared.importPhotos(
+                items,
+                into: modelContext,
+                selectedPet: selectedPet
+            ) { @MainActor value, status in
+                importProgress = value
+                importStatus = status
+            }
+        } catch {
+            importErrorMessage = error.localizedDescription
+            showImportError = true
+        }
+
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        isImporting = false
+        importItems = []
+    }
+}

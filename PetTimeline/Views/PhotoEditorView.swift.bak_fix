@@ -1,0 +1,320 @@
+import SwiftUI
+import PencilKit
+
+/// 照片编辑视图：支持添加文字、表情和涂鸦
+struct PhotoEditorView: View {
+    let imageData: Data
+    let onSave: (Data) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var canvasView: PKCanvasView = PKCanvasView()
+    @State private var textElements: [TextElement] = []
+    @State private var emojiElements: [EmojiElement] = []
+    @State private var currentText: String = ""
+    @State private var currentEmoji: String = ""
+    @State private var textSize: CGFloat = 24
+    @State private var textColor: Color = .white
+    @State private var showingTextInput = false
+    @State private var showingEmojiPicker = false
+    @State private var showingColorPicker = false
+    @State private var selectedTool: Tool = .pen
+    @State private var lineWidth: CGFloat = 3.0
+    @State private var strokeColor: Color = .red
+
+    enum Tool {
+        case pen, eraser, text, emoji
+    }
+
+    struct TextElement: Identifiable {
+        let id = UUID()
+        var text: String
+        var position: CGPoint
+        var size: CGFloat
+        var color: Color
+    }
+
+    struct EmojiElement: Identifiable {
+        let id = UUID()
+        var emoji: String
+        var position: CGPoint
+        var size: CGFloat
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            // 蓝色背景，避免黑屏
+            Color(red: 0.1, green: 0.12, blue: 0.18)
+                .ignoresSafeArea()
+
+            GeometryReader { geometry in
+                ZStack(alignment: .top) {
+                    // 基础图片（居中等比缩放）
+                    if let uiImage = UIImage(data: imageData) {
+                        Image(uiImage: uiImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+
+                    // 画布（透明背景，叠加在图片上）
+                    CanvasView(canvasView: $canvasView, lineWidth: $lineWidth, strokeColor: $strokeColor, selectedTool: $selectedTool)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    // 文字元素
+                    ForEach(textElements) { element in
+                        Text(element.text)
+                            .font(.system(size: element.size))
+                            .foregroundColor(element.color)
+                            .position(element.position)
+                            .gesture(
+                                DragGesture()
+                                    .onChanged { value in
+                                        if let index = textElements.firstIndex(where: { $0.id == element.id }) {
+                                            textElements[index].position = value.location
+                                        }
+                                    }
+                            )
+                    }
+
+                    // 表情元素
+                    ForEach(emojiElements) { element in
+                        Text(element.emoji)
+                            .font(.system(size: element.size))
+                            .position(element.position)
+                            .gesture(
+                                DragGesture()
+                                    .onChanged { value in
+                                        if let index = emojiElements.firstIndex(where: { $0.id == element.id }) {
+                                            emojiElements[index].position = value.location
+                                        }
+                                    }
+                            )
+                    }
+
+                    // 工具栏
+                    VStack {
+                        Spacer()
+                        HStack {
+                            ToolButton(icon: "pencil", label: "笔", isSelected: selectedTool == .pen) {
+                                selectedTool = .pen
+                            }
+                            ToolButton(icon: "eraser.fill", label: "橡皮", isSelected: selectedTool == .eraser) {
+                                selectedTool = .eraser
+                            }
+                            ToolButton(icon: "textformat.size", label: "文字", isSelected: selectedTool == .text) {
+                                selectedTool = .text
+                                showingTextInput = true
+                            }
+                            ToolButton(icon: "face.smiling", label: "表情", isSelected: selectedTool == .emoji) {
+                                selectedTool = .emoji
+                                showingEmojiPicker = true
+                            }
+                            ToolButton(icon: "trash", label: "清除", isSelected: false) {
+                                canvasView.drawing = PKDrawing()
+                                textElements.removeAll()
+                                emojiElements.removeAll()
+                            }
+                        }
+                        .padding()
+                        .background(.ultraThinMaterial)
+                    }
+                }
+            }
+
+            // 顶部工具栏：取消、完成
+            VStack(spacing: 0) {
+                HStack {
+                    Button("取消") {
+                        dismiss()
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(.black.opacity(0.5))
+                    .cornerRadius(20)
+
+                    Spacer()
+
+                    Button("完成") {
+                        saveEditedImage()
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.blue.opacity(0.8))
+                    .cornerRadius(20)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+                Spacer()
+            }
+        }
+        .sheet(isPresented: $showingTextInput) {
+            VStack(spacing: 16) {
+                TextField("输入文字", text: $currentText)
+                    .textFieldStyle(.roundedBorder)
+                    .padding()
+
+                HStack {
+                    Slider(value: $textSize, in: 12...72, step: 1) {
+                        Text("大小: \(Int(textSize))")
+                    }
+                    .padding(.horizontal)
+
+                    ColorPicker("颜色", selection: $textColor)
+                }
+                .padding()
+
+                Button("添加文字") {
+                    if !currentText.isEmpty {
+                        let center = CGPoint(x: UIScreen.main.bounds.width / 2, y: UIScreen.main.bounds.height / 2)
+                        textElements.append(TextElement(text: currentText, position: center, size: textSize, color: textColor))
+                        currentText = ""
+                        showingTextInput = false
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .padding()
+            }
+            .presentationDetents([.medium])
+        }
+        .sheet(isPresented: $showingEmojiPicker) {
+            EmojiPickerView(selectedEmoji: $currentEmoji) { emoji in
+                let center = CGPoint(x: UIScreen.main.bounds.width / 2, y: UIScreen.main.bounds.height / 2)
+                emojiElements.append(EmojiElement(emoji: emoji, position: center, size: 48))
+                showingEmojiPicker = false
+            }
+            .presentationDetents([.medium])
+        }
+    }
+
+    private func saveEditedImage() {
+        let renderer = ImageRenderer(content:
+            ZStack {
+                if let uiImage = UIImage(data: imageData) {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .scaledToFit()
+                }
+
+                CanvasView(canvasView: $canvasView, lineWidth: $lineWidth, strokeColor: $strokeColor, selectedTool: $selectedTool)
+                    .allowsHitTesting(false)
+
+                ForEach(textElements) { element in
+                    Text(element.text)
+                        .font(.system(size: element.size))
+                        .foregroundColor(element.color)
+                        .position(element.position)
+                }
+
+                ForEach(emojiElements) { element in
+                    Text(element.emoji)
+                        .font(.system(size: element.size))
+                        .position(element.position)
+                }
+            }
+            .frame(width: UIScreen.main.bounds.width, height: UIScreen.main.bounds.height)
+        )
+
+        if let uiImage = renderer.uiImage,
+           let data = uiImage.jpegData(compressionQuality: 0.9) {
+            onSave(data)
+        }
+
+        dismiss()
+    }
+}
+
+// MARK: - Supporting Views
+
+struct CanvasView: UIViewRepresentable {
+    @Binding var canvasView: PKCanvasView
+    @Binding var lineWidth: CGFloat
+    @Binding var strokeColor: Color
+    @Binding var selectedTool: PhotoEditorView.Tool
+
+    func makeUIView(context: Context) -> PKCanvasView {
+        canvasView.isOpaque = false
+        canvasView.backgroundColor = .clear
+        canvasView.drawingPolicy = .anyInput
+        canvasView.tool = PKInkingTool(.pen, color: .red, width: 3)
+        canvasView.minimumZoomScale = 1
+        canvasView.maximumZoomScale = 1
+        return canvasView
+    }
+
+    func updateUIView(_ uiView: PKCanvasView, context: Context) {
+        switch selectedTool {
+        case .pen:
+            uiView.tool = PKInkingTool(.pen, color: UIColor(strokeColor), width: lineWidth)
+        case .eraser:
+            uiView.tool = PKEraserTool(.vector)
+        case .text, .emoji:
+            // 非绘图工具时保持当前工具但不响应输入
+            break
+        }
+    }
+}
+
+struct ToolButton: View {
+    let icon: String
+    let label: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack {
+                Image(systemName: icon)
+                    .font(.system(size: 20))
+                Text(label)
+                    .font(.caption)
+            }
+            .foregroundColor(isSelected ? .blue : .primary)
+            .frame(width: 50, height: 50)
+            .background(isSelected ? Color.blue.opacity(0.1) : Color.clear)
+            .cornerRadius(8)
+        }
+    }
+}
+
+struct EmojiPickerView: View {
+    @Binding var selectedEmoji: String
+    let onSelect: (String) -> Void
+
+    let emojis = [
+        "😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "😊", "😇",
+        "🙂", "🙃", "😉", "😌", "😍", "😘", "😗", "😙", "😚", "😋",
+        "😛", "😝", "😜", "🤪", "🤨", "🧐", "🤓", "😎", "🤩", "🥶",
+        "🥵", "😱", "😨", "😰", "😥", "😓", "🤗", "🤔", "🤭", "🤫",
+        "🤥", "😶", "😐", "😑", "😬", "🙄", "😯", "😦", "😧", "😖",
+        "😣", "😞", "😟", "😤", "😢", "😭", "😦", "😧", "😨", "😩",
+        "🤯", "😳", "🥵", "🥶", "😱", "😖", "😣", "😞", "😟", "😤",
+        "😢", "😭", "😂", "🤣", "😊", "😇", "🙂", "🙃", "😉", "😌",
+        "😍", "😘", "😗", "😙", "😚", "😋", "😛", "😝", "😜", "🤪",
+        "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐨", "🐯",
+        "🦁", "🐮", "🐷", "🐸", "🐵", "🙈", "🙉", "🙊", "🐒", "🐔",
+        "🐧", "🐦", "🐤", "🐣", "🐥", "🦆", "🦅", "🦉", "🦇", "🐺",
+        "🐗", "🐴", "🦌", "🐭", "🐹", "🐰", "🦝", "🐻", "🐨", "🐾"
+    ]
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                ForEach(emojis, id: \.self) { emoji in
+                    Text(emoji)
+                        .font(.system(size: 32))
+                        .frame(width: 50, height: 50)
+                        .background(selectedEmoji == emoji ? Color.blue.opacity(0.2) : Color.clear)
+                        .cornerRadius(8)
+                        .onTapGesture {
+                            selectedEmoji = emoji
+                            onSelect(emoji)
+                        }
+                }
+            }
+            .padding()
+        }
+        .presentationDetents([.medium])
+    }
+}

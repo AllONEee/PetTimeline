@@ -1,0 +1,337 @@
+import SwiftUI
+import SwiftData
+
+/// 时间轴单条事件卡片
+/// - 左侧垂直时间线（始终存在、连续竖线 + 类型色圆点）
+/// - 卡片不再有灰色背景
+/// - 照片展示：主图放大，其余堆叠在右侧，左右滑动切换主图
+/// - 点击主图进入全屏预览（可从预览进入编辑）
+/// - 卡片右上角三个点：编辑照片、添加记录
+/// - 左滑删除，级联删除关联照片
+struct TimelineRow: View {
+    @Environment(\.modelContext) private var modelContext
+    let event: TimelineEvent
+    let onDelete: () -> Void
+
+    @State private var selectedPhotoIndex = 0
+    @State private var showDeleteError = false
+    @State private var deleteErrorMessage = ""
+    @State private var showPhotoPreview = false
+    @State private var showPhotoEditor = false
+    @State private var showRecordEditor = false
+
+    private let dotColumnWidth: CGFloat = 14
+    private let lineWidth: CGFloat = 2
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            // 左侧时间线：圆点（始终存在）
+            VStack(spacing: 0) {
+                Circle()
+                    .fill(event.eventType.color)
+                    .frame(width: 14, height: 14)
+                    .padding(.top, 14)
+                    .overlay(
+                        Circle()
+                            .stroke(Color(uiColor: .secondarySystemBackground), lineWidth: 2)
+                    )
+                Spacer()
+            }
+            .frame(width: dotColumnWidth)
+
+            card
+        }
+        // 贯穿整行的连续竖线，与圆点对齐
+        .overlay(alignment: .topLeading) {
+            Rectangle()
+                .fill(Color.secondary.opacity(0.25))
+                .frame(width: lineWidth)
+                .frame(maxHeight: .infinity)
+                .offset(x: (dotColumnWidth - lineWidth) / 2, y: 14)
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button(role: .destructive) {
+                onDelete()
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+        .alert("删除失败", isPresented: $showDeleteError) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(deleteErrorMessage)
+        }
+        // 全屏预览
+        .fullScreenCover(isPresented: $showPhotoPreview) {
+            PhotoPreviewView(photos: event.photos, startIndex: selectedPhotoIndex)
+        }
+        // 编辑页
+        .fullScreenCover(isPresented: $showPhotoEditor) {
+            if let photoData = event.photos[safe: selectedPhotoIndex]?.imageData {
+                PhotoEditorView(imageData: photoData) { editedData in
+                    updateEventPhoto(editedData)
+                }
+            }
+        }
+        // 添加记录页
+        .sheet(isPresented: $showRecordEditor) {
+            AddRecordView(event: event)
+        }
+    }
+
+    // MARK: - 卡片（无灰色背景）
+
+    private var card: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+
+            if !event.title.isEmpty {
+                Text(event.title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+            }
+
+            if !event.content.isEmpty {
+                Text(event.content)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
+
+            if let location = event.locationName, !location.isEmpty {
+                Label(location, systemImage: "location.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !event.photos.isEmpty {
+                PhotoGalleryView(
+                    photos: event.photos,
+                    selectedIndex: $selectedPhotoIndex,
+                    onMainImageTap: {
+                        // 点击主图进入全屏预览
+                        showPhotoPreview = true
+                    }
+                )
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(event.date.displayDateString)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.primary)
+            }
+
+            Spacer(minLength: 8)
+
+            // 右上角三个点菜单
+            Menu {
+                Button {
+                    editEventPhotos()
+                } label: {
+                    Label("编辑照片", systemImage: "photo.on.rectangle.angled")
+                }
+                Button {
+                    addEventRecord()
+                } label: {
+                    Label("添加记录", systemImage: "plus.circle")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - 操作
+
+    private func editEventPhotos() {
+        // 直接打开编辑页（编辑当前选中的照片）
+        if event.photos[safe: selectedPhotoIndex] != nil {
+            showPhotoEditor = true
+        }
+    }
+
+    private func addEventRecord() {
+        showRecordEditor = true
+    }
+
+    private func updateEventPhoto(_ newImageData: Data) {
+        // 更新选中的照片
+        if let index = event.photos.firstIndex(where: { $0.id == event.photos[selectedPhotoIndex].id }) {
+            event.photos[index].imageData = newImageData
+            try? modelContext.save()
+        }
+    }
+
+    func deleteEvent() {
+        do {
+            modelContext.delete(event)
+            try modelContext.save()
+        } catch {
+            deleteErrorMessage = error.localizedDescription
+            showDeleteError = true
+        }
+    }
+}
+
+/// 照片展示区：主图放大，其余堆叠在右侧，左右滑动切换主图
+struct PhotoGalleryView: View {
+    let photos: [EventPhoto]
+    @Binding var selectedIndex: Int
+    let onMainImageTap: () -> Void
+
+    var body: some View {
+        if photos.count == 1 {
+            mainImage(photos[0])
+                .frame(maxWidth: .infinity)
+                .frame(height: 240)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .onTapGesture { onMainImageTap() }
+        } else {
+            ZStack(alignment: .center) {
+                // 主图
+                mainImage(photos[selectedIndex])
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 240)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .onTapGesture { onMainImageTap() }
+
+                // 右侧堆叠缩略图
+                HStack(spacing: -20) {
+                    ForEach(Array(photos.enumerated()), id: \.offset) { index, photo in
+                        if index != selectedIndex {
+                            Image(uiImage: UIImage(data: photo.imageData) ?? UIImage())
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 70, height: 90)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .stroke(Color.white, lineWidth: 2)
+                                )
+                                .shadow(radius: 2)
+                                .zIndex(Double(photos.count - index))
+                                .onTapGesture {
+                                    withAnimation { selectedIndex = index }
+                                }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.trailing, 20)
+            }
+            .frame(height: 240)
+            .gesture(
+                DragGesture(minimumDistance: 20)
+                    .onEnded { value in
+                        let threshold: CGFloat = 50
+                        if value.translation.width < -threshold {
+                            selectedIndex = min(selectedIndex + 1, photos.count - 1)
+                        } else if value.translation.width > threshold {
+                            selectedIndex = max(selectedIndex - 1, 0)
+                        }
+                    }
+            )
+            .onTapGesture { onMainImageTap() }
+        }
+    }
+
+    private func mainImage(_ photo: EventPhoto) -> some View {
+        Group {
+            if let uiImage = UIImage(data: photo.imageData) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                Rectangle()
+                    .fill(Color.gray.opacity(0.25))
+                    .overlay {
+                        Image(systemName: "photo")
+                            .foregroundStyle(.secondary)
+                    }
+            }
+        }
+    }
+}
+
+/// 照片预览（全屏）- 支持在预览页切换、编辑当前照片
+struct PhotoPreviewView: View {
+    let photos: [EventPhoto]
+    let startIndex: Int
+    @Environment(\.dismiss) private var dismiss
+    @State private var currentIndex: Int
+
+    init(photos: [EventPhoto], startIndex: Int) {
+        self.photos = photos
+        self.startIndex = startIndex
+        _currentIndex = State(initialValue: startIndex)
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            TabView(selection: $currentIndex) {
+                ForEach(Array(photos.enumerated()), id: \.offset) { index, photo in
+                    Image(uiImage: UIImage(data: photo.imageData) ?? UIImage())
+                        .resizable()
+                        .scaledToFit()
+                        .tag(index)
+                }
+            }
+            .tabViewStyle(.page)
+            .ignoresSafeArea()
+            .background(Color.black)
+            .overlay(alignment: .topTrailing) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 28))
+                        .foregroundColor(.white)
+                        .opacity(0.8)
+                }
+                .padding()
+            }
+            .onAppear { currentIndex = startIndex }
+        }
+    }
+}
+
+/// 单张照片缩略图（保留供其他可能用到的地方）
+struct PhotoThumbnailView: View {
+    let imageData: Data
+
+    var body: some View {
+        Group {
+            if let uiImage = UIImage(data: imageData) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                Rectangle()
+                    .fill(Color.gray.opacity(0.25))
+                    .overlay {
+                        Image(systemName: "photo")
+                            .foregroundStyle(.secondary)
+                    }
+            }
+        }
+        .frame(width: 84, height: 84)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+/// 安全数组下标
+extension Array {
+    subscript(safe index: Int) -> Element? {
+        return indices.contains(index) ? self[index] : nil
+    }
+}

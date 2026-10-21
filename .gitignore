@@ -1,0 +1,13 @@
+# Xcode
+*.xcarchive
+*.xcworkspace
+.DS_Store
+*.log
+*.tmp
+*.swiftdoc
+*.swiftinterface
+*.xcuser*
+*.xcconfig
+
+# SwiftData
+*.sqlite
